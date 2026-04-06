@@ -1,4 +1,5 @@
-"""QCentroid Classical Solver: Priority Dispatch + Adaptive Large Neighborhood Search (ALNS)
+"""
+QCentroid Classical Solver: Priority Dispatch + Adaptive Large Neighborhood Search (ALNS)
 Dynamic Production Scheduling for Stainless Steel Manufacturing
 
 Algorithm:
@@ -158,3 +159,136 @@ def _priority_dispatch(jobs: List[dict], machines: List[dict], processing_times:
             })
 
     return schedule
+
+
+def _alns_improve(initial_schedule: List[dict], data: Dict, max_iterations: int, max_time_s: float,
+                  temperature: float, cooling_rate: float, planning_horizon: dict) -> List[dict]:
+    """
+    Improve schedule using Adaptive Large Neighborhood Search.
+    """
+    best_schedule = [s.copy() for s in initial_schedule]
+    current_schedule = [s.copy() for s in initial_schedule]
+    best_cost = _compute_cost(best_schedule, data)
+
+    start_time = time.time()
+    for iteration in range(max_iterations):
+        if time.time() - start_time > max_time_s:
+            break
+
+        # Destroy phase: remove random subset
+        destroy_size = random.randint(1, max(2, len(current_schedule) // 4))
+        destroy_indices = random.sample(range(len(current_schedule)), min(destroy_size, len(current_schedule)))
+        removed = [current_schedule[i] for i in sorted(destroy_indices, reverse=True)]
+        temp_schedule = [current_schedule[i] for i in range(len(current_schedule)) if i not in destroy_indices]
+
+        # Repair phase: reinsert greedily
+        for item in removed:
+            best_pos = len(temp_schedule)
+            best_pos_cost = float('inf')
+            for pos in range(len(temp_schedule) + 1):
+                test_schedule = temp_schedule[:pos] + [item] + temp_schedule[pos:]
+                cost = _compute_cost(test_schedule, data)
+                if cost < best_pos_cost:
+                    best_pos_cost = cost
+                    best_pos = pos
+            temp_schedule.insert(best_pos, item)
+
+        new_cost = _compute_cost(temp_schedule, data)
+        delta = new_cost - best_cost
+
+        # Simulated annealing acceptance
+        if delta < 0 or random.random() < math.exp(-delta / max(temperature, 0.1)):
+            current_schedule = temp_schedule
+            if new_cost < best_cost:
+                best_schedule = [s.copy() for s in temp_schedule]
+                best_cost = new_cost
+
+        # Cool down
+        temperature *= cooling_rate
+
+    return best_schedule
+
+
+def _compute_cost(schedule: List[dict], data: Dict) -> float:
+    """
+    Compute total cost of schedule (makespan + weighted tardiness).
+    """
+    if not schedule:
+        return 0
+
+    makespan = max(s["end_time"] for s in schedule)
+    jobs = data["jobs"]
+    job_due_dates = {j["id"]: j.get("due_date", float('inf')) for j in jobs}
+
+    tardiness = 0
+    for s in schedule:
+        due_date = job_due_dates.get(s["job_id"], float('inf'))
+        if s["end_time"] > due_date:
+            tardiness += (s["end_time"] - due_date)
+
+    return makespan + 0.5 * tardiness
+
+
+def _compute_metrics(schedule: List[dict], data: Dict, planning_horizon: dict) -> Dict:
+    """
+    Compute detailed metrics for the schedule.
+    """
+    if not schedule:
+        return {
+            "makespan": 0,
+            "total_tardiness": 0,
+            "average_utilization": 0,
+            "on_time_jobs": 0,
+            "machine_utilizations": {}
+        }
+
+    machines = data["machines"]
+    jobs = data["jobs"]
+    end_time = planning_horizon.get("end_time", 72)
+
+    # Makespan
+    makespan = max(s["end_time"] for s in schedule)
+
+    # Tardiness
+    job_due_dates = {j["id"]: j.get("due_date", float('inf')) for j in jobs}
+    total_tardiness = 0
+    on_time_jobs = 0
+    for s in schedule:
+        due_date = job_due_dates.get(s["job_id"], float('inf'))
+        if s["end_time"] > due_date:
+            total_tardiness += (s["end_time"] - due_date)
+        else:
+            on_time_jobs += 1
+
+    # Machine utilization
+    machine_utilizations = {}
+    for machine in machines:
+        mach_id = machine["id"]
+        total_proc_time = sum(s["end_time"] - s["start_time"] for s in schedule if s["machine_id"] == mach_id)
+        util = (total_proc_time / end_time) * 100 if end_time > 0 else 0
+        machine_utilizations[mach_id] = util
+
+    avg_util = sum(machine_utilizations.values()) / len(machine_utilizations) if machine_utilizations else 0
+
+    return {
+        "makespan": makespan,
+        "total_tardiness": total_tardiness,
+        "average_utilization": avg_util,
+        "on_time_jobs": on_time_jobs,
+        "machine_utilizations": machine_utilizations
+    }
+
+
+def _format_output(schedule: List[dict], metrics: Dict, data: Dict, planning_horizon: dict, metadata: dict) -> dict:
+    """
+    Format output for QCentroid benchmark.
+    """
+    return {
+        "status": "SUCCESS",
+        "schedule": schedule,
+        "metrics": metrics,
+        "planning_horizon": planning_horizon,
+        "metadata": metadata,
+        "algorithm": "QCentroid Classical Solver",
+        "timestamp": time.time()
+    }
